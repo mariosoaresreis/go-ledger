@@ -93,6 +93,9 @@ func (s *transferCommandService) InitiateTransfer(ctx context.Context, req Trans
 	if tgt.Status != domain.StatusActive {
 		return nil, fmt.Errorf("target account %s is not active", req.TargetAccountID)
 	}
+	if tgt.Currency != req.Currency {
+		return nil, fmt.Errorf("currency mismatch on target account")
+	}
 
 	transferID := uuid.NewString()
 	now := time.Now().UTC()
@@ -188,9 +191,214 @@ func (s *transferCommandService) InitiateTransfer(ctx context.Context, req Trans
 		return nil, fmt.Errorf("initiate transfer: transaction: %w", err)
 	}
 
-	// Best-effort Kafka publish.
+	// Best-effort Kafka publish of first saga step.
 	_ = s.kafkaProducer.PublishEvent(ctx, transferInitiated)
 	_ = s.kafkaProducer.PublishEvent(ctx, debitEvent)
 
+	completedEvent, err := s.completeTransfer(ctx, transferID, req, now)
+	if err != nil {
+		if compErr := s.compensateTransfer(ctx, transferID, req, now, err.Error()); compErr != nil {
+			return nil, fmt.Errorf("transfer completion failed: %v; compensation failed: %v", err, compErr)
+		}
+		return nil, fmt.Errorf("transfer completion failed and was compensated: %w", err)
+	}
+
+	if idempotencyKey != "" {
+		evtBytes, _ := json.Marshal(completedEvent)
+		rec := &domain.IdempotencyRecord{
+			Key:        idempotencyKey,
+			StatusCode: 202,
+			Response:   evtBytes,
+			CreatedAt:  time.Now().UTC(),
+		}
+		_ = s.idempotency.Save(ctx, rec)
+	}
+
 	return transferInitiated, nil
+}
+
+func (s *transferCommandService) completeTransfer(ctx context.Context, transferID string, req TransferRequest, startedAt time.Time) (*domain.LedgerEvent, error) {
+	tgt, err := s.accountRepo.GetByID(ctx, req.TargetAccountID)
+	if err != nil {
+		return nil, fmt.Errorf("reload target account: %w", err)
+	}
+	if tgt.Status != domain.StatusActive {
+		return nil, fmt.Errorf("target account became non-active")
+	}
+	if tgt.Currency != req.Currency {
+		return nil, fmt.Errorf("target account currency mismatch")
+	}
+
+	tgtVersion, err := s.eventStore.GetCurrentVersion(ctx, req.TargetAccountID)
+	if err != nil {
+		return nil, err
+	}
+
+	creditPayload, _ := json.Marshal(domain.AccountCreditedPayload{
+		AccountID: req.TargetAccountID,
+		Amount:    req.Amount,
+		Currency:  req.Currency,
+		Reference: "TRANSFER:" + transferID,
+	})
+	creditEvent := &domain.LedgerEvent{
+		ID:          uuid.NewString(),
+		AggregateID: req.TargetAccountID,
+		Version:     tgtVersion + 1,
+		EventType:   domain.EventAccountCredited,
+		Payload:     creditPayload,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	completedPayload, _ := json.Marshal(domain.TransferCompletedPayload{
+		TransferID:      transferID,
+		SourceAccountID: req.SourceAccountID,
+		TargetAccountID: req.TargetAccountID,
+		Amount:          req.Amount,
+		Currency:        req.Currency,
+		CompletedAt:     time.Now().UTC().Format(time.RFC3339),
+	})
+	completedEvent := &domain.LedgerEvent{
+		ID:          uuid.NewString(),
+		AggregateID: transferID,
+		Version:     2,
+		EventType:   domain.EventTransferCompleted,
+		Payload:     completedPayload,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	tgt.Balance += req.Amount
+	tgt.Version = creditEvent.Version
+	tgt.UpdatedAt = time.Now().UTC()
+
+	outboxCredit := &domain.OutboxEntry{
+		ID:          uuid.NewString(),
+		AggregateID: req.TargetAccountID,
+		EventType:   string(domain.EventAccountCredited),
+		Payload:     creditPayload,
+		CreatedAt:   startedAt,
+	}
+	outboxCompleted := &domain.OutboxEntry{
+		ID:          uuid.NewString(),
+		AggregateID: transferID,
+		EventType:   string(domain.EventTransferCompleted),
+		Payload:     completedPayload,
+		CreatedAt:   startedAt,
+	}
+
+	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewInsert().Model(creditEvent).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(completedEvent).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewUpdate().Model(tgt).WherePK().Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(outboxCredit).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(outboxCompleted).Exec(ctx); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.kafkaProducer.PublishEvent(ctx, creditEvent)
+	_ = s.kafkaProducer.PublishEvent(ctx, completedEvent)
+
+	return completedEvent, nil
+}
+
+func (s *transferCommandService) compensateTransfer(ctx context.Context, transferID string, req TransferRequest, startedAt time.Time, reason string) error {
+	src, err := s.accountRepo.GetByID(ctx, req.SourceAccountID)
+	if err != nil {
+		return fmt.Errorf("reload source account for compensation: %w", err)
+	}
+
+	srcVersion, err := s.eventStore.GetCurrentVersion(ctx, req.SourceAccountID)
+	if err != nil {
+		return err
+	}
+
+	creditPayload, _ := json.Marshal(domain.AccountCreditedPayload{
+		AccountID: req.SourceAccountID,
+		Amount:    req.Amount,
+		Currency:  req.Currency,
+		Reference: "TRANSFER_REVERSED:" + transferID,
+	})
+	creditEvent := &domain.LedgerEvent{
+		ID:          uuid.NewString(),
+		AggregateID: req.SourceAccountID,
+		Version:     srcVersion + 1,
+		EventType:   domain.EventAccountCredited,
+		Payload:     creditPayload,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	reversedPayload, _ := json.Marshal(domain.TransferReversedPayload{
+		TransferID:      transferID,
+		SourceAccountID: req.SourceAccountID,
+		TargetAccountID: req.TargetAccountID,
+		Amount:          req.Amount,
+		Currency:        req.Currency,
+		Reason:          reason,
+	})
+	reversedEvent := &domain.LedgerEvent{
+		ID:          uuid.NewString(),
+		AggregateID: transferID,
+		Version:     2,
+		EventType:   domain.EventTransferReversed,
+		Payload:     reversedPayload,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	src.Balance += req.Amount
+	src.Version = creditEvent.Version
+	src.UpdatedAt = time.Now().UTC()
+
+	outboxCredit := &domain.OutboxEntry{
+		ID:          uuid.NewString(),
+		AggregateID: req.SourceAccountID,
+		EventType:   string(domain.EventAccountCredited),
+		Payload:     creditPayload,
+		CreatedAt:   startedAt,
+	}
+	outboxReversed := &domain.OutboxEntry{
+		ID:          uuid.NewString(),
+		AggregateID: transferID,
+		EventType:   string(domain.EventTransferReversed),
+		Payload:     reversedPayload,
+		CreatedAt:   startedAt,
+	}
+
+	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewInsert().Model(creditEvent).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(reversedEvent).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewUpdate().Model(src).WherePK().Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(outboxCredit).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewInsert().Model(outboxReversed).Exec(ctx); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	_ = s.kafkaProducer.PublishEvent(ctx, creditEvent)
+	_ = s.kafkaProducer.PublishEvent(ctx, reversedEvent)
+
+	return nil
 }

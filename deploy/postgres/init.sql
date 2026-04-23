@@ -1,0 +1,3 @@
+CREATE DATABASE ledger;
+CREATE DATABASE ledger_query;
+

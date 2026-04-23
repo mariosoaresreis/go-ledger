@@ -1,0 +1,102 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ledger-postgres
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.8
+    container_name: ledger-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - "1G"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy: true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  command-service:
+    build:
+      context: /home/bat/projects/go/go-ledger
+      dockerfile: Dockerfile
+    container_name: ledger-command-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      ENVIRONMENT: "local"
+      LEDGER_DB_HOST: postgres
+      LEDGER_DB_PORT: "5432"
+      LEDGER_DB_USERNAME: ledger
+      LEDGER_DB_PASSWORD: ledger
+      LEDGER_DB_NAME: ledger
+      LEDGER_DB_SSL_MODE: disable
+      LEDGER_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      LEDGER_KAFKA_TOPIC: ledger.events
+    ports:
+      - "8080:8080"
+
+  query-service:
+    build:
+      context: /home/bat/projects/go/go-ledger-query-service
+      dockerfile: Dockerfile
+    container_name: ledger-query-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      PORT: "8081"
+      ENVIRONMENT: "local"
+      LEDGER_QUERY_DB_HOST: postgres
+      LEDGER_QUERY_DB_PORT: "5432"
+      LEDGER_QUERY_DB_USERNAME: ledger
+      LEDGER_QUERY_DB_PASSWORD: ledger
+      LEDGER_QUERY_DB_NAME: ledger_query
+      LEDGER_QUERY_DB_SSL_MODE: disable
+      LEDGER_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      LEDGER_KAFKA_TOPIC: ledger.events
+      LEDGER_KAFKA_GROUP_ID: ledger-query-service
+    ports:
+      - "8081:8081"
+
+volumes:
+  postgres_data:
+

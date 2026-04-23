@@ -8,6 +8,8 @@ Write side of the CQRS ledger. This service validates and processes mutating com
 - `POST /api/v1/accounts/{accountId}/credits`
 - `POST /api/v1/accounts/{accountId}/debits`
 - `POST /api/v1/transfers`
+  - Emits `TRANSFER_INITIATED`, then attempts `ACCOUNT_CREDITED` + `TRANSFER_COMPLETED`
+  - On credit failure, emits compensating `ACCOUNT_CREDITED` (source refund) + `TRANSFER_REVERSED`
 - `PATCH /api/v1/accounts/{accountId}/status`
 - `GET /api/v1/accounts/{accountId}/events` (raw audit log from event store)
 - Swagger UI at `GET /swagger/index.html`
@@ -59,6 +61,23 @@ curl -s http://localhost:8080/api/ping
 curl -s http://localhost:8080/swagger/index.html | head -n 5
 ```
 
+## Full local stack (Postgres + Kafka + both services)
+
+Use the compose file at `docker-compose.yml` from this repository root:
+
+```bash
+cd /home/bat/projects/go/go-ledger
+docker compose up --build -d
+```
+
+Optional checks:
+
+```bash
+docker compose ps
+curl -s http://localhost:8080/api/ping
+curl -s http://localhost:8081/api/ping
+```
+
 ## Terraform (GCP)
 
 Command-service Terraform environment is at:
@@ -73,4 +92,3 @@ cp terraform.tfvars.example terraform.tfvars
 terraform init
 terraform plan
 ```
-

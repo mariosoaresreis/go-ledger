@@ -54,3 +54,23 @@ type TransferInitiatedPayload struct {
 	Amount          int64  `json:"amount"`
 	Currency        string `json:"currency"`
 }
+
+// TransferCompletedPayload is the payload for EventTransferCompleted.
+type TransferCompletedPayload struct {
+	TransferID      string `json:"transferId"`
+	SourceAccountID string `json:"sourceAccountId"`
+	TargetAccountID string `json:"targetAccountId"`
+	Amount          int64  `json:"amount"`
+	Currency        string `json:"currency"`
+	CompletedAt     string `json:"completedAt"`
+}
+
+// TransferReversedPayload is the payload for EventTransferReversed.
+type TransferReversedPayload struct {
+	TransferID      string `json:"transferId"`
+	SourceAccountID string `json:"sourceAccountId"`
+	TargetAccountID string `json:"targetAccountId"`
+	Amount          int64  `json:"amount"`
+	Currency        string `json:"currency"`
+	Reason          string `json:"reason"`
+}
