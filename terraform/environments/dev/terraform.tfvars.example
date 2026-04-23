@@ -1,0 +1,20 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# Never commit terraform.tfvars to version control.
+project_id   = "your-gcp-project-id"
+environment  = "dev"
+region       = "us-central1"
+# Database
+db_password  = "CHANGE_ME_USE_A_STRONG_PASSWORD"
+# GKE – minimal dev sizing
+machine_type = "e2-standard-2"
+node_count   = 2
+min_nodes    = 1
+max_nodes    = 3
+# Cloud SQL – cheapest tier for dev
+db_tier      = "db-f1-micro"
+# Memorystore
+redis_memory_size_gb = 1
+# Application
+app_image_tag  = "latest"
+app_replicas   = 2
+kafka_replicas = 1
