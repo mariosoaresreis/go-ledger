@@ -34,34 +34,34 @@ const (
 
 // LedgerEvent is the persisted domain event stored in the event store.
 type LedgerEvent struct {
-	ID          string    `bun:"id,pk"`
-	AggregateID string    `bun:"aggregate_id,notnull"`
-	Version     int64     `bun:"version,notnull"`
-	EventType   EventType `bun:"event_type,notnull"`
-	Payload     []byte    `bun:"payload,type:jsonb,notnull"`
-	CreatedAt   time.Time `bun:"created_at,notnull,default:now()"`
+	ID          string    `db:"id" bun:"id,pk"`
+	AggregateID string    `db:"aggregate_id" bun:"aggregate_id,notnull"`
+	Version     int64     `db:"version" bun:"version,notnull"`
+	EventType   EventType `db:"event_type" bun:"event_type,notnull"`
+	Payload     []byte    `db:"payload" bun:"payload,type:jsonb,notnull"`
+	CreatedAt   time.Time `db:"created_at" bun:"created_at,notnull,default:now()"`
 }
 
 func (LedgerEvent) TableName() string { return "ledger_events" }
 
 // OutboxEntry is the transactional outbox record that Debezium/CDC will relay to Kafka.
 type OutboxEntry struct {
-	ID          string    `bun:"id,pk"`
-	AggregateID string    `bun:"aggregate_id,notnull"`
-	EventType   string    `bun:"event_type,notnull"`
-	Payload     []byte    `bun:"payload,type:jsonb,notnull"`
-	CreatedAt   time.Time `bun:"created_at,notnull,default:now()"`
-	Processed   bool      `bun:"processed,notnull,default:false"`
+	ID          string    `db:"id" bun:"id,pk"`
+	AggregateID string    `db:"aggregate_id" bun:"aggregate_id,notnull"`
+	EventType   string    `db:"event_type" bun:"event_type,notnull"`
+	Payload     []byte    `db:"payload" bun:"payload,type:jsonb,notnull"`
+	CreatedAt   time.Time `db:"created_at" bun:"created_at,notnull,default:now()"`
+	Processed   bool      `db:"processed" bun:"processed,notnull,default:false"`
 }
 
 func (OutboxEntry) TableName() string { return "outbox" }
 
 // IdempotencyRecord stores the result of a previously processed command.
 type IdempotencyRecord struct {
-	Key        string    `bun:"key,pk"`
-	StatusCode int       `bun:"status_code,notnull"`
-	Response   []byte    `bun:"response,type:jsonb"`
-	CreatedAt  time.Time `bun:"created_at,notnull,default:now()"`
+	Key        string    `db:"key" bun:"key,pk"`
+	StatusCode int       `db:"status_code" bun:"status_code,notnull"`
+	Response   []byte    `db:"response" bun:"response,type:jsonb"`
+	CreatedAt  time.Time `db:"created_at" bun:"created_at,notnull,default:now()"`
 }
 
 func (IdempotencyRecord) TableName() string { return "idempotency_keys" }

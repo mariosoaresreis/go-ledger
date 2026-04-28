@@ -2,12 +2,13 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/uptrace/bun"
+	"github.com/jmoiron/sqlx"
 	"go-ledger/internal/domain"
 	"go-ledger/internal/kafka"
 	"go-ledger/internal/repository"
@@ -47,7 +48,7 @@ type AccountCommandService interface {
 }
 
 type accountCommandService struct {
-	db            *bun.DB
+	db            *sqlx.DB
 	eventStore    repository.EventStoreRepository
 	accountRepo   repository.AccountRepository
 	outboxRepo    repository.OutboxRepository
@@ -57,7 +58,7 @@ type accountCommandService struct {
 
 // NewAccountCommandService creates a new AccountCommandService.
 func NewAccountCommandService(
-	db *bun.DB,
+	db *sqlx.DB,
 	eventStore repository.EventStoreRepository,
 	accountRepo repository.AccountRepository,
 	outboxRepo repository.OutboxRepository,
@@ -110,14 +111,14 @@ func (s *accountCommandService) CreateAccount(ctx context.Context, req CreateAcc
 	}
 
 	// Atomic: persist event + account state + outbox in one transaction.
-	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
+	err := withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, event); err != nil {
 			return fmt.Errorf("insert event: %w", err)
 		}
-		if _, err := tx.NewInsert().Model(account).Exec(ctx); err != nil {
+		if err := insertAccount(ctx, tx, account); err != nil {
 			return fmt.Errorf("insert account: %w", err)
 		}
-		if _, err := tx.NewInsert().Model(outbox).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outbox); err != nil {
 			return fmt.Errorf("insert outbox: %w", err)
 		}
 		return nil
@@ -190,14 +191,14 @@ func (s *accountCommandService) CreditAccount(ctx context.Context, accountID str
 	account.Version = event.Version
 	account.UpdatedAt = time.Now().UTC()
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, event); err != nil {
 			return fmt.Errorf("insert event: %w", err)
 		}
-		if _, err := tx.NewInsert().Model(outbox).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outbox); err != nil {
 			return fmt.Errorf("insert outbox: %w", err)
 		}
-		if _, err := tx.NewUpdate().Model(account).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, account); err != nil {
 			return fmt.Errorf("update account: %w", err)
 		}
 		if idempotencyKey != "" {
@@ -208,7 +209,7 @@ func (s *accountCommandService) CreditAccount(ctx context.Context, accountID str
 				Response:   evtBytes,
 				CreatedAt:  time.Now().UTC(),
 			}
-			if _, err := tx.NewInsert().Model(rec).On("CONFLICT (key) DO NOTHING").Exec(ctx); err != nil {
+			if err := insertIdempotency(ctx, tx, rec); err != nil {
 				return fmt.Errorf("insert idempotency: %w", err)
 			}
 		}
@@ -283,14 +284,14 @@ func (s *accountCommandService) DebitAccount(ctx context.Context, accountID stri
 	account.Version = event.Version
 	account.UpdatedAt = time.Now().UTC()
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, event); err != nil {
 			return fmt.Errorf("insert event: %w", err)
 		}
-		if _, err := tx.NewInsert().Model(outbox).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outbox); err != nil {
 			return fmt.Errorf("insert outbox: %w", err)
 		}
-		if _, err := tx.NewUpdate().Model(account).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, account); err != nil {
 			return fmt.Errorf("update account: %w", err)
 		}
 		if idempotencyKey != "" {
@@ -301,7 +302,7 @@ func (s *accountCommandService) DebitAccount(ctx context.Context, accountID stri
 				Response:   evtBytes,
 				CreatedAt:  time.Now().UTC(),
 			}
-			if _, err := tx.NewInsert().Model(rec).On("CONFLICT (key) DO NOTHING").Exec(ctx); err != nil {
+			if err := insertIdempotency(ctx, tx, rec); err != nil {
 				return fmt.Errorf("insert idempotency: %w", err)
 			}
 		}
@@ -354,14 +355,14 @@ func (s *accountCommandService) ChangeAccountStatus(ctx context.Context, account
 	account.Version = event.Version
 	account.UpdatedAt = time.Now().UTC()
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(event).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, event); err != nil {
 			return fmt.Errorf("insert event: %w", err)
 		}
-		if _, err := tx.NewInsert().Model(outbox).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outbox); err != nil {
 			return fmt.Errorf("insert outbox: %w", err)
 		}
-		if _, err := tx.NewUpdate().Model(account).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, account); err != nil {
 			return fmt.Errorf("update account: %w", err)
 		}
 		return nil
@@ -372,4 +373,60 @@ func (s *accountCommandService) ChangeAccountStatus(ctx context.Context, account
 
 	_ = s.kafkaProducer.PublishEvent(ctx, event)
 	return event, nil
+}
+
+func withTx(ctx context.Context, db *sqlx.DB, fn func(tx *sqlx.Tx) error) error {
+	tx, err := db.BeginTxx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func insertLedgerEvent(ctx context.Context, tx *sqlx.Tx, event *domain.LedgerEvent) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO ledger_events (id, aggregate_id, version, event_type, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, event.ID, event.AggregateID, event.Version, event.EventType, event.Payload, event.CreatedAt)
+	return err
+}
+
+func insertAccount(ctx context.Context, tx *sqlx.Tx, account *domain.Account) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO accounts (id, owner_id, currency, balance, status, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, account.ID, account.OwnerID, account.Currency, account.Balance, account.Status, account.Version, account.CreatedAt, account.UpdatedAt)
+	return err
+}
+
+func updateAccount(ctx context.Context, tx *sqlx.Tx, account *domain.Account) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE accounts
+		SET balance = $1, status = $2, version = $3, updated_at = $4
+		WHERE id = $5
+	`, account.Balance, account.Status, account.Version, account.UpdatedAt, account.ID)
+	return err
+}
+
+func insertOutbox(ctx context.Context, tx *sqlx.Tx, outbox *domain.OutboxEntry) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox (id, aggregate_id, event_type, payload, created_at, processed)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, outbox.ID, outbox.AggregateID, outbox.EventType, outbox.Payload, outbox.CreatedAt, outbox.Processed)
+	return err
+}
+
+func insertIdempotency(ctx context.Context, tx *sqlx.Tx, rec *domain.IdempotencyRecord) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO idempotency_keys (key, status_code, response, created_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (key) DO NOTHING
+	`, rec.Key, rec.StatusCode, rec.Response, rec.CreatedAt)
+	return err
 }

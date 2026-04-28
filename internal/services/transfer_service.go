@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/uptrace/bun"
+	"github.com/jmoiron/sqlx"
 	"go-ledger/internal/domain"
 	"go-ledger/internal/kafka"
 	"go-ledger/internal/repository"
@@ -27,7 +27,7 @@ type TransferCommandService interface {
 }
 
 type transferCommandService struct {
-	db            *bun.DB
+	db            *sqlx.DB
 	eventStore    repository.EventStoreRepository
 	accountRepo   repository.AccountRepository
 	outboxRepo    repository.OutboxRepository
@@ -37,7 +37,7 @@ type transferCommandService struct {
 
 // NewTransferCommandService creates a new TransferCommandService.
 func NewTransferCommandService(
-	db *bun.DB,
+	db *sqlx.DB,
 	eventStore repository.EventStoreRepository,
 	accountRepo repository.AccountRepository,
 	outboxRepo repository.OutboxRepository,
@@ -157,20 +157,20 @@ func (s *transferCommandService) InitiateTransfer(ctx context.Context, req Trans
 		CreatedAt:   now,
 	}
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(transferInitiated).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, transferInitiated); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(debitEvent).Exec(ctx); err != nil {
+		if err := insertLedgerEvent(ctx, tx, debitEvent); err != nil {
 			return err
 		}
-		if _, err := tx.NewUpdate().Model(src).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, src); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxTransfer).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxTransfer); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxDebit).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxDebit); err != nil {
 			return err
 		}
 		if idempotencyKey != "" {
@@ -181,7 +181,7 @@ func (s *transferCommandService) InitiateTransfer(ctx context.Context, req Trans
 				Response:   evtBytes,
 				CreatedAt:  now,
 			}
-			if _, err := tx.NewInsert().Model(rec).On("CONFLICT (key) DO NOTHING").Exec(ctx); err != nil {
+			if err := insertIdempotency(ctx, tx, rec); err != nil {
 				return err
 			}
 		}
@@ -285,20 +285,20 @@ func (s *transferCommandService) completeTransfer(ctx context.Context, transferI
 		CreatedAt:   startedAt,
 	}
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(creditEvent).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, creditEvent); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(completedEvent).Exec(ctx); err != nil {
+		if err := insertLedgerEvent(ctx, tx, completedEvent); err != nil {
 			return err
 		}
-		if _, err := tx.NewUpdate().Model(tgt).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, tgt); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxCredit).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxCredit); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxCompleted).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxCompleted); err != nil {
 			return err
 		}
 		return nil
@@ -375,20 +375,20 @@ func (s *transferCommandService) compensateTransfer(ctx context.Context, transfe
 		CreatedAt:   startedAt,
 	}
 
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.NewInsert().Model(creditEvent).Exec(ctx); err != nil {
+	err = withTx(ctx, s.db, func(tx *sqlx.Tx) error {
+		if err := insertLedgerEvent(ctx, tx, creditEvent); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(reversedEvent).Exec(ctx); err != nil {
+		if err := insertLedgerEvent(ctx, tx, reversedEvent); err != nil {
 			return err
 		}
-		if _, err := tx.NewUpdate().Model(src).WherePK().Exec(ctx); err != nil {
+		if err := updateAccount(ctx, tx, src); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxCredit).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxCredit); err != nil {
 			return err
 		}
-		if _, err := tx.NewInsert().Model(outboxReversed).Exec(ctx); err != nil {
+		if err := insertOutbox(ctx, tx, outboxReversed); err != nil {
 			return err
 		}
 		return nil

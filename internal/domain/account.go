@@ -4,14 +4,14 @@ import "time"
 
 // Account is the write-side aggregate root. It is reconstructed from events.
 type Account struct {
-	ID        string        `bun:"id,pk"`
-	OwnerID   string        `bun:"owner_id,notnull"`
-	Currency  string        `bun:"currency,notnull"`
-	Balance   int64         `bun:"balance,notnull,default:0"` // stored as minor units (cents)
-	Status    AccountStatus `bun:"status,notnull,default:'ACTIVE'"`
-	Version   int64         `bun:"version,notnull,default:0"`
-	CreatedAt time.Time     `bun:"created_at,notnull,default:now()"`
-	UpdatedAt time.Time     `bun:"updated_at,notnull,default:now()"`
+	ID        string        `db:"id" bun:"id,pk"`
+	OwnerID   string        `db:"owner_id" bun:"owner_id,notnull"`
+	Currency  string        `db:"currency" bun:"currency,notnull"`
+	Balance   int64         `db:"balance" bun:"balance,notnull,default:0"` // stored as minor units (cents)
+	Status    AccountStatus `db:"status" bun:"status,notnull,default:'ACTIVE'"`
+	Version   int64         `db:"version" bun:"version,notnull,default:0"`
+	CreatedAt time.Time     `db:"created_at" bun:"created_at,notnull,default:now()"`
+	UpdatedAt time.Time     `db:"updated_at" bun:"updated_at,notnull,default:now()"`
 }
 
 func (Account) TableName() string { return "accounts" }
